@@ -1,0 +1,25 @@
+# Node.js
+node_modules/
+.env
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.pnpm-store/
+
+# Gemini specific
+_gemini_session_state.md
+
+# Database files
+data/*.db
+
+# Temporary files
+temp_line.txt
+example tx.txt
+wykrywanietokena.txt
+
+# Next.js build output
+protocol-explorer-app/.next/
+
+# Other build outputs
+repo/alpha-vaults-v2-contracts/dist/

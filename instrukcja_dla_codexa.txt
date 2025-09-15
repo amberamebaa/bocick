@@ -1,0 +1,53 @@
+Tytuł: Implementacja funkcji zakupu tokena w bocie monitorującym Story Protocol
+
+1. Opis Narzędzia (Twoja Rola jako AI):
+Jesteś interaktywnym agentem CLI, specjalizującym się w zadaniach inżynierii oprogramowania. Twoim celem jest bezpieczne i efektywne pomaganie użytkownikom, ściśle przestrzegając instrukcji i wykorzystując dostępne narzędzia. Posiadasz dostęp do systemu plików (odczyt, zapis, listowanie, wyszukiwanie), możliwość uruchamiania komend shellowych oraz wyszukiwania w internecie.
+
+2. Kontekst Projektu i Obecny Stan Bota:
+*   Cel Bota: Monitorowanie blockchaina Story Protocol w czasie rzeczywistym w celu wykrywania specyficznych transakcji i alertowania użytkownika poprzez Telegram.
+*   Język: JavaScript (Node.js).
+*   Główne pliki:
+    *   `src/bot.js`: Główny plik uruchamiający bota i obsługujący interakcje z Telegramem.
+    *   `src/services/storyMonitor.js`: Zawiera główną logikę monitorowania blockchaina, w tym funkcję `checkBlockForIPEvents`.
+    *   `.env`: Plik konfiguracyjny zawierający klucz prywatny (`PRIVATE_KEY`) i inne zmienne środowiskowe.
+*   Mechanizm wykrywania rekomendacji (zaimplementowany):
+    *   Bot monitoruje bloki i filtruje transakcje, gdzie `tx.to` to `0x1062916B1Be3c034C1dC6C26f682Daf1861A3909` (adres routera DEX-a) i `tx.data` zaczyna się od `0xc04b8d59`.
+    *   Dla tych transakcji, bot dynamicznie wyodrębnia adres smart kontraktu z `tx.data`. Adres ten znajduje się na końcu ciągu `tx.data`, poprzedzony ciągiem "bb8".
+    *   Bot agreguje liczbę transakcji (`matchCount`) i sumę przetransferowanego WIP (`totalWip`) dla każdego unikalnego adresu smart kontraktu w danym bloku.
+    *   Jeśli dla *jakiegokolwiek* adresu smart kontraktu `matchCount >= 10` ORAZ `totalWip >= 500 WIP`, bot generuje alert "TRADING CONDITIONS MET!" i wskazuje ten smart kontrakt jako rekomendowany.
+    *   **Ważne:** Bot ma dostęp do `signer` zainicjalizowanego z `PRIVATE_KEY` z pliku `.env`.
+
+3. Oczekiwana Finalna Wersja (Cel):
+Celem jest, aby bot, po spełnieniu warunków rekomendacji dla danego smart kontraktu, **automatycznie wykonał zakup tego tokena w ilości 0.2 WIP**.
+
+4. Rekomendacje dotyczące Implementacji (Moja Analiza i Wskazówki):
+*   Lokalizacja kodu zakupu: Funkcja zakupu powinna zostać zaimplementowana w klasie `StoryProtocolMonitor` w pliku `src/services/storyMonitor.js`. Można ją nazwać `executePurchase(tokenToBuyAddress, amountWipToSpend)`.
+*   Integracja: Funkcja `executePurchase` powinna być wywoływana z funkcji `sendTradingConditionAlert` w `src/services/storyMonitor.js`, gdy warunki rekomendacji zostaną spełnione.
+*   Szczegóły transakcji zakupu (na podstawie `test_purchase_final_v2.js`):
+    *   Adresy:
+        *   `SWAP_ROUTER_ADDRESS`: `0x1062916B1Be3c034C1dC6C26f682Daf1861A3909` (to jest adres DEX-a, z którym bot się łączy).
+        *   `AGGREGATOR_ADDRESS`: `0xe47809790a0ce703c2ac81598c90d5cc1569675d` (prawdopodobnie kontrakt agregujący swapy, używany jako `to` w transakcji swapa).
+        *   `WIP_TOKEN_ADDRESS`: `0x1514000000000000000000000000000000000000` (adres tokena WIP).
+        *   `WETH9_ADDRESS`: `0x4200000000000000000000000000000000000006` (standardowy adres WETH9, używany w ABI SwapRoutera).
+    *   ABI:
+        *   `SWAP_ROUTER_ABI`: ABI dla Uniswap V3 SwapRouter (Router01). ABI zostało znalezione w poprzednich wyszukiwaniach i zawiera funkcje takie jak `exactInputSingle`, `exactInput`, `WETH9()`.
+        *   `ERC20_ABI`: Standardowe ABI dla tokenów ERC20 (funkcje `approve`, `allowance`, `decimals`).
+    *   Przepływ zakupu:
+        1.  Pobranie adresu WIP9: Użyj `swapRouterContract.WETH9()` (zakładając, że `WIP9()` w `test_purchase_final_v2.js` odnosi się do WETH9 lub jego odpowiednika na tym DEX-ie).
+        2.  Zatwierdzenie (Approve): Sprawdź `allowance` dla `AGGREGATOR_ADDRESS` na kontrakcie WIP. Jeśli jest niewystarczające, wykonaj transakcję `approve` na `ethers.MaxUint256`.
+        3.  Wykonanie Swapa:
+            *   Użyj `rawInputForSwap` (`0x8b22555800000201090000200000bc8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016345785d8a0000000000000000000000000000000000000000000000000000930dcd3914c9f6c2774014bbbe2702274c01aca0bd0c5389779f5a05001001100002b000014d5178f9f07b08d01d075cc5b7e1a1ae23a37b3811522cb2fed1367201d51d4e51514000000000000000000000000000000000000000bb8d1b2d3df51c3e5a22b09993354b8717e3a7e4d3be15b147923a4a1c4b9bc0aff6e476713e36c0ec3000000000083293e000068c6be390003005a`) i `originalAmountSlot` (`000000000000000000000000000000000000000000000000016345785d8a0000`) z pliku `test_purchase_final_v2.js`.
+            *   Dynamicznie zastąp `originalAmountSlot` w `rawInputForSwap` rzeczywistą ilością WIP do wydania (0.2 WIP).
+            *   Wyślij transakcję za pomocą `this.signer.sendTransaction` z `to: AGGREGATOR_ADDRESS`, `value: amountToSend` (jeśli WIP jest natywnym tokenem lub jest wysyłany jako wartość) i `data: finalRawInput`.
+        4.  Obsługa błędów: Zaimplementuj `try-catch` do obsługi błędów transakcji i logowania szczegółów.
+*   Ilość zakupu: `amountWipToSpend` powinien być ustawiony na `0.2`.
+*   Gas Limits: Użyj `GAS_LIMIT_APPROVE` (100000) i `GAS_LIMIT_SWAP` (300000).
+*   Slippage: `rawInputForSwap` prawdopodobnie zawiera zakodowany slippage. Jeśli nie, lub jeśli jest to problem, będzie to wymagało dalszej analizy `rawInputForSwap` lub użycia funkcji `exactInputSingle` z Uniswap V3 Routera, która pozwala na określenie `amountOutMinimum`. Na razie zakładamy, że `rawInputForSwap` jest wystarczający.
+*   Logowanie: Dodaj szczegółowe logowanie postępu i wyników transakcji.
+
+5. Dodatkowe Uwagi:
+*   Bezpieczeństwo: Podkreśl, że operacje na realnych środkach wymagają najwyższej ostrożności.
+*   Testowanie: Po implementacji, konieczne będzie dokładne testowanie w środowisku testowym (np. Hardhat Network, Sepolia) z użyciem prawdziwych kluczy prywatnych i tokenów testowych, aby upewnić się, że transakcje są wykonywane poprawnie i bezpiecznie.
+*   Dynamiczne parametry: Zwróć uwagę na to, że `rawInputForSwap` jest bardzo specyficzny. W przyszłości, jeśli bot miałby kupować różne tokeny lub używać innych ścieżek swapów, konieczne byłoby dynamiczne generowanie `rawInputForSwap` lub użycie funkcji `exactInputSingle` z Uniswap V3 Routera, która przyjmuje bardziej elastyczne parametry.
+
+---

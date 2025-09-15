@@ -1,0 +1,680 @@
+const axios = require('axios');
+const { ethers } = require('ethers');
+
+class StoryProtocolMonitor {
+    constructor(database) {
+        this.db = database;
+        this.rpcUrls = [
+            'https://mainnet.storyrpc.io',
+            'https://rpc.story.foundation',
+            'https://story-rpc.ankr.com'
+        ];
+        this.storyscanUrl = 'https://www.storyscan.io';
+        this.provider = null;
+        this.currentRpcIndex = 0;
+        this.isMonitoring = false;
+        this.lastCheckedBlock = null;
+        this.contractAddresses = {
+            IPAssetRegistry: '0x35Ec4c334f82AbA1d4F69759A2f6e4bdCf597695'
+        };
+    this.monitoredTokens = []; // Array to store tokens for 2-hour monitoring
+    }
+
+    async initialize() {
+        // Try each RPC URL until one works
+        for (let i = 0; i < this.rpcUrls.length; i++) {
+            const rpcUrl = this.rpcUrls[i];
+            console.log(`🔗 Trying RPC: ${rpcUrl}`);
+
+            try {
+                this.provider = new ethers.JsonRpcProvider(rpcUrl);
+                console.log(`[DEBUG] Provider initialized for ${rpcUrl}`);
+
+                // Test connection with timeout
+                const blockNumberPromise = this.provider.getBlockNumber();
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000));
+
+                const result = await Promise.race([blockNumberPromise, timeoutPromise]);
+                console.log(`[DEBUG] Promise.race result:`, result);
+
+                const blockNumber = result; // Assign result to blockNumber
+
+                console.log(`✅ Connected to Story Protocol RPC - Block: ${blockNumber}`);
+                console.log(`✅ Using RPC: ${rpcUrl}`);
+                this.currentRpcIndex = i;
+                this.lastCheckedBlock = blockNumber;
+                return true;
+
+            } catch (error) {
+                console.log(`❌ RPC ${rpcUrl} failed: ${error.message}`);
+                console.error(`[DEBUG] Full error object:`, error); // Log full error object
+                continue;
+            }
+        }
+
+        console.error('❌ All RPC endpoints failed.');
+        return false;
+    }
+
+    async startMonitoring(bot) {
+        if (this.isMonitoring) {
+            console.log('⚠️  Monitoring already started');
+            return;
+        }
+
+        this.isMonitoring = true;
+        this.bot = bot;
+
+        console.log('🔍 Starting Story Protocol monitoring...');
+
+        if (this.provider) {
+            console.log('✅ Using real blockchain monitoring');
+            this.monitorNewBlocks();
+        } else {
+            console.log('❌ No RPC connection - monitoring disabled');
+        }
+
+        console.log('✅ Story Protocol monitoring started');
+    }
+
+    
+
+        
+    async monitorNewBlocks() {
+        const checkInterval = 3000; // 3 seconds
+
+        const monitor = async () => {
+            if (!this.isMonitoring) return;
+
+            try {
+                const currentBlock = await this.provider.getBlockNumber();
+                console.log(`[${new Date().toLocaleTimeString()}] [monitorNewBlocks] Current block: ${currentBlock}, Last checked block: ${this.lastCheckedBlock}`);
+
+                if (this.lastCheckedBlock && currentBlock > this.lastCheckedBlock) {
+                    console.log(`[${new Date().toLocaleTimeString()}] [monitorNewBlocks] Checking blocks ${this.lastCheckedBlock + 1} to ${currentBlock}`);
+
+                    // Check each new block for IP asset creation events
+                    for (let blockNum = this.lastCheckedBlock + 1; blockNum <= currentBlock; blockNum++) {
+                        await this.checkBlockForIPEvents(blockNum);
+                    }
+                }
+
+                this.lastCheckedBlock = currentBlock;
+
+            } catch (error) {
+                console.error('❌ Error monitoring blocks:', error.message);
+
+                // Try to reconnect if connection failed
+                if (error.message.includes('CONNECTION') || error.message.includes('TIMEOUT')) {
+                    console.log('🔄 Attempting to reconnect...');
+                    await this.initialize();
+                }
+            }
+
+            // Schedule next check
+            setTimeout(monitor, checkInterval);
+        };
+
+        monitor();
+    }
+
+    async checkBlockForIPEvents(blockNumber) {
+        try {
+            const block = await this.provider.getBlock(blockNumber, true);
+            if (!block || !block.transactions) {
+                return;
+            }
+
+            const targetToAddress = '0x1062916B1Be3c034C1dC6C26f682Daf1861A3909'.toLowerCase();
+            const targetDataPrefix = '0xc04b8d59';
+
+            console.log(`[TEST MODE] Checking block ${blockNumber} for target transactions...`);
+
+            // Create an array of promises, where each promise is a getTransaction call
+            const transactionPromises = block.transactions.map(txHash => this.provider.getTransaction(txHash));
+
+            // Wait for all promises to resolve
+            const transactions = await Promise.all(transactionPromises);
+
+            // Now iterate through the full transaction objects
+            for (const tx of transactions) {
+                if (!tx || !tx.to) continue;
+
+                if (tx.to.toLowerCase() === targetToAddress && tx.data.startsWith(targetDataPrefix)) {
+                    console.log(`✅ Detected Target Transaction: ${tx.hash}`);
+                    // --- NEW DECODING LOGIC ---
+                    try {
+                        const abi = ['function exactInput(tuple(bytes path, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum))'];
+                        const iface = new ethers.Interface(abi);
+                        const decodedData = iface.decodeFunctionData("exactInput", tx.data);
+                        const amountIn = decodedData[0].amountIn;
+                        const formattedAmount = ethers.formatEther(amountIn); // Assuming 18 decimals for IP token
+
+                        console.log(`   - Decoded Amount (IP): ${formattedAmount}`);
+                        await this.sendTargetTransactionAlert(tx, formattedAmount);
+
+                    } catch (e) {
+                        console.error(`   - Error decoding transaction data: ${e.message}`);
+                        // Send alert without amount if decoding fails
+                        await this.sendTargetTransactionAlert(tx);
+                    }
+                    // --- END DECODING LOGIC ---
+                }
+            }
+        } catch (error) {
+            console.error(`❌ Error checking block ${blockNumber} in test mode:`, error.message);
+        }
+    }
+
+    async sendTargetTransactionAlert(tx, amount = null) {
+        try {
+            const users = await this.db.getAllUsers();
+            if (users.length === 0) {
+                console.log('📭 No users to send target transaction alert to');
+                return;
+            }
+
+            let amountString = '';
+            if (amount !== null) {
+                amountString = `**Amount:** ${parseFloat(amount).toFixed(4)} IP
+`;
+            }
+
+            const alertMessage = `
+🎯 **Test Target Transaction Detected!**
+
+A transaction matching your specified criteria has been found.
+
+**To:** 
+${tx.to}
+**Method:** 
+${tx.data.substring(0, 10)}
+${amountString}[View on Storyscan](${this.storyscanUrl}/tx/${tx.hash})
+            `;
+
+            console.log(`📢 Sending Target Transaction alert to ${users.length} users for tx ${tx.hash}`);
+
+            for (const user of users) {
+                try {
+                    await this.bot.sendMessage(user.chat_id, alertMessage, {
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: true
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                } catch (error) {
+                    console.error(`❌ Failed to send target alert to user ${user.id}:`, error.message);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Error sending target transaction alert:', error);
+        }
+    }
+
+    async checkForMultipleTokenTransfers(blockNumber, transferEventsInBlock) {
+        for (const tokenAddress in transferEventsInBlock) {
+            const transfers = transferEventsInBlock[tokenAddress];
+
+            if (transfers.length > 10) {
+                let totalValue = ethers.toBigInt(0);
+                for (const transfer of transfers) {
+                    totalValue = totalValue + transfer.value;
+                }
+
+                // Assuming WIP token has 18 decimals for now. This might need to be dynamic if other tokens are involved.
+                const WIP_DECIMALS = 18;
+                const thresholdInWei = ethers.parseUnits("500", WIP_DECIMALS); // 500 whole WIP tokens
+
+                if (totalValue > thresholdInWei) {
+                    console.log(`🚨 ALERT: Multiple Token Transfers Detected in Block ${blockNumber}!`);
+                    console.log(`   Token Address: ${tokenAddress}`);
+                    console.log(`   Number of Transfers: ${transfers.length}`);
+                    console.log(`   Total Value (Wei): ${totalValue.toString()}`);
+                    console.log(`   Total Value (WIP): ${ethers.formatUnits(totalValue, WIP_DECIMALS)}`);
+                    console.log(`   Transaction Hashes: ${transfers.map(t => t.txHash).join(', ')}`);
+
+                    // TODO: Implement actual alert sending (e.g., to Discord)
+                    await this.sendMultipleTransferAlert(blockNumber, tokenAddress, transfers.length, ethers.formatUnits(totalValue, WIP_DECIMALS), transfers.map(t => t.txHash));
+                }
+            }
+        }
+    }
+
+    async sendMultipleTransferAlert(blockNumber, tokenAddress, numTransfers, totalValueWIP, txHashes) {
+        try {
+            const users = await this.db.getAllUsers();
+
+            if (users.length === 0) {
+                console.log('📭 No users to alert for multiple transfers');
+                return;
+            }
+
+            const alertMessage = `
+🚨 **MULTIPLE TOKEN TRANSFERS DETECTED!**
+
+**Block Number:** ${blockNumber}
+**Token Address:** 
+${tokenAddress}
+**Number of Transfers:** ${numTransfers}
+**Total Value (WIP):** ${totalValueWIP}
+**Transaction Hashes:**
+${txHashes.map(hash => ` - [${hash.substring(0, 10)}...](${this.storyscanUrl}/tx/${hash})`).join('\n')}
+
+📈 High volume of transfers for the same token detected!
+            `;
+
+            console.log(`📢 Sending multiple transfer alert to ${users.length} users for token ${tokenAddress}`);
+
+            for (const user of users) {
+                try {
+                    await this.bot.sendMessage(user.chat_id, alertMessage, {
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: true
+                    });
+
+                    await new Promise(resolve => setTimeout(resolve, 100));
+
+                } catch (error) {
+                    console.error(`❌ Failed to send multiple transfer alert to user ${user.user_id}:`, error.message);
+                }
+            }
+
+        } catch (error) {
+            console.error('❌ Error sending multiple transfer alerts:', error);
+        }
+    }
+
+    async isWhaleTransaction(tx, tokenAddress, decodedLog) {
+        const ignoredTokens = [
+            '0x1514000000000000000000000000000000000000'.toLowerCase()
+        ];
+
+        if (ignoredTokens.includes(tokenAddress.toLowerCase())) {
+            return; // It's an ignored token, so we do nothing.
+        }
+
+        // --- TEMPORARY DEBUG LOGGING ---
+        try {
+            const tokenContract = new ethers.Contract(tokenAddress, ["function decimals() view returns (uint8)"], this.provider);
+            const tokenDecimals = await tokenContract.decimals();
+            const formattedValue = ethers.formatUnits(decodedLog.args.value, tokenDecimals);
+
+            console.log(`[DEBUG] Whale Check:
+                - TxHash: ${tx.hash}
+                - Token: ${tokenAddress}
+                - Decimals: ${tokenDecimals}
+                - Raw Value: ${decodedLog.args.value.toString()}
+                - Formatted Value: ${formattedValue} IP
+            `);
+        } catch (e) {
+            console.log(`[DEBUG] Could not get decimals for ${tokenAddress}. Error: ${e.message}`);
+        }
+        // --- END OF DEBUG LOGGING ---
+
+        const { value } = decodedLog.args;
+        const DECIMALS = 18; // Assuming 18 decimals, might need to be dynamic
+        const threshold = ethers.parseUnits("15", DECIMALS);
+
+        if (value > threshold) {
+            console.log(`🚨 WHALE ALERT: Large transaction detected on token ${tokenAddress} | TxHash: ${tx.hash}`);
+            await this.sendWhaleAlert(tx, tokenAddress, decodedLog.args);
+        }
+    }
+
+    async sendWhaleAlert(tx, tokenAddress, args) {
+        try {
+            const users = await this.db.getAllUsers();
+            if (users.length === 0) {
+                console.log('📭 No users to send whale alert to');
+                return;
+            }
+
+            const { from, to, value } = args;
+            const DECIMALS = 18;
+            const valueFormatted = ethers.formatUnits(value, DECIMALS);
+
+            const alertMessage = `
+🐋 **WHALE ALERT!** 🐋
+
+A large transaction has been detected!
+
+**Token:** 
+${tokenAddress}
+**From:** 
+${from}
+**To:** 
+${to}
+**Value:** **${parseFloat(valueFormatted).toFixed(2)} IP**
+
+[View on Storyscan](${this.storyscanUrl}/tx/${tx.hash})
+            `;
+
+            console.log(`📢 Sending WHALE alert to ${users.length} users for tx ${tx.hash}`);
+
+            for (const user of users) {
+                try {
+                    await this.bot.sendMessage(user.chat_id, alertMessage, {
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: true
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                } catch (error) {
+                    console.error(`❌ Failed to send whale alert to user ${user.id}:`, error.message);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Error sending whale alert:', error);
+        }
+    }
+
+    async analyzeTransaction(txHash, block) {
+        try {
+            
+            const fullTx = await this.provider.getTransaction(txHash.hash || txHash);
+
+            if (!fullTx) {
+                return;
+            }
+            
+            
+
+            // Check if transaction is related to IP asset creation
+            const isIPCreation = await this.isIPAssetCreation(fullTx);
+            
+
+            if (isIPCreation) {
+                const ipAsset = await this.extractIPAssetInfo(fullTx, block);
+                if (ipAsset) {
+                    await this.processNewIPs([ipAsset]);
+                }
+            }
+
+        } catch (error) {
+            console.error(`❌ Error analyzing transaction:`, error.message);
+        }
+    }
+
+    async isIPAssetCreation(tx) {
+        const REGISTER_FUNCTION_SELECTOR = '0x2c02107b';
+        const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+        
+        
+        
+
+        // Condition 1: Original IPTokenized event detection (based on 'to' address and function selector)
+        const isIPTokenizedTx = (
+            tx.to?.toLowerCase() === this.contractAddresses.IPAssetRegistry.toLowerCase() &&
+            tx.data?.startsWith(REGISTER_FUNCTION_SELECTOR)
+        );
+
+        // Condition 2: User's requested zero address to IPAssetRegistry transaction (checking 'from' and 'to' addresses)
+        const isZeroAddressToIPAssetRegistryTx = (
+            tx.from?.toLowerCase() === ZERO_ADDRESS &&
+            tx.to?.toLowerCase() === this.contractAddresses.IPAssetRegistry.toLowerCase()
+        );
+
+        // Condition 3: User's requested token creation transaction
+        const isSpecificTokenCreationTx = (
+            tx.to?.toLowerCase() === '0x759e25a058181647e996c7071fc1eba377e5bddb' &&
+            tx.data?.startsWith('0x5476b732')
+        );
+
+        if (isSpecificTokenCreationTx) {
+            console.log(`[${new Date().toLocaleTimeString()}] ✅ Detected specific token creation transaction: ${tx.hash}`);
+        }
+
+        return isIPTokenizedTx || isZeroAddressToIPAssetRegistryTx || isSpecificTokenCreationTx;
+    }
+
+    async extractIPAssetInfo(tx, block) {
+        try {
+            console.log(`[${new Date().toLocaleTimeString()}] [extractIPAssetInfo] Extracting info for tx: ${tx.hash}`);
+            const receipt = await this.provider.getTransactionReceipt(tx.hash);
+
+            if (!receipt || !receipt.logs) {
+                console.log(`[${new Date().toLocaleTimeString()}] [extractIPAssetInfo] No receipt or logs for tx: ${tx.hash}`);
+                return null;
+            }
+
+            // ABI for the IPRegistered event
+            const ipCreationABI = [
+                "event IPTokenized(address ipId, address token)"
+            ];
+
+            const iface = new ethers.Interface(ipCreationABI);
+
+            // Parse logs for IP asset creation events
+            for (const log of receipt.logs) {
+                console.log(`[${new Date().toLocaleTimeString()}] [extractIPAssetInfo] Processing log from address: ${log.address.toLowerCase()}, Expected: ${this.contractAddresses.IPAssetRegistry.toLowerCase()}`);
+                // Ensure the log is from the IPAssetRegistry contract
+                if (log.address.toLowerCase() === this.contractAddresses.IPAssetRegistry.toLowerCase()) {
+                    try {
+                        const decodedLog = iface.parseLog({
+                            topics: log.topics,
+                            data: log.data
+                        });
+
+                        if (decodedLog.name === 'IPTokenized') {
+                            console.log(`[${new Date().toLocaleTimeString()}] ✅ Decoded IPTokenized event for tx: ${tx.hash}`);
+                            return {
+                                address: decodedLog.args.token, // This is the token contract address
+                                ipId: decodedLog.args.ipId,
+                                name: 'Unknown',
+                                creator: 'Unknown', // IPTokenized event does not provide creator directly
+                                createdAt: new Date(block.timestamp * 1000).toISOString(),
+                                txHash: tx.hash,
+                                blockNumber: block.number,
+                                initialSupply: 'Unknown'
+                            };
+                        }
+                    } catch (e) {
+                        // Log is not an IPAssetRegistered event, or decoding failed
+                        // console.log(`ℹ️ Log in tx ${tx.hash} is not an IPAssetRegistered event or decoding failed: ${e.message}`);
+                    }
+                }
+            }
+
+            return null;
+
+        } catch (error) {
+            console.error(`❌ Error extracting IP info:`, error.message);
+            return null;
+        }
+    }
+
+    async parseIPCreationLog(log, tx, block) {
+        try {
+            const ipCreationABI = [
+                "event IPTokenized(address ipId, address token)"
+            ];
+
+            const iface = new ethers.Interface(ipCreationABI);
+            const decodedLog = iface.parseLog({
+                topics: log.topics,
+                data: log.data
+            });
+
+            if (decodedLog.name === 'IPTokenized') {
+                console.log(`✅ Decoded IPTokenized event for tx: ${tx.hash}`);
+                return {
+                    address: decodedLog.args.token, // This is the token contract address
+                    ipId: decodedLog.args.ipId,
+                    name: 'Unknown',
+                    creator: 'Unknown', // IPTokenized event does not provide creator directly
+                    createdAt: new Date(block.timestamp * 1000).toISOString(),
+                    txHash: tx.hash,
+                    blockNumber: block.number,
+                    // We don't have initialSupply from this event, so we'll have to fetch it or set to unknown
+                    initialSupply: 'Unknown' 
+                };
+            }
+
+            return null;
+
+        } catch (error) {
+            // This error is expected if the log is not the one we are looking for
+            if (error.message.includes("no matching event")) {
+                // console.log(`ℹ️ Log in tx ${tx.hash} is not an IPAssetRegistered event.`);
+            } else {
+                console.error(`❌ Error parsing IP creation log for tx ${tx.hash}:`, error.message);
+            }
+            return null;
+        }
+    }
+
+    // ✅ FALLBACK: Monitor via Storyscan API
+    async monitorViaStoryscan() {
+        const checkInterval = 60000; // 1 minute
+
+        const monitor = async () => {
+            if (!this.isMonitoring) return;
+
+            try {
+                console.log('🔍 Checking Storyscan for new IP assets...');
+                const newIPs = await this.fetchFromStoryscan();
+
+                if (newIPs.length > 0) {
+                    console.log(`🆕 Found ${newIPs.length} new IP assets via Storyscan`);
+                    await this.processNewIPs(newIPs);
+                }
+
+            } catch (error) {
+                console.error('❌ Error monitoring via Storyscan:', error.message);
+            }
+
+            setTimeout(monitor, checkInterval);
+        };
+
+        monitor();
+    }
+
+    async fetchFromStoryscan() {
+        try {
+            // Try to fetch from Storyscan API
+            const response = await axios.get(`${this.storyscanUrl}/api/v1/tokens`, {
+                params: {
+                    limit: 10,
+                    sort: 'created_desc'
+                },
+                timeout: 10000,
+                headers: {
+                    'User-Agent': 'Story-Monitor-Bot/2.0'
+                }
+            });
+
+            if (response.data && response.data.tokens) {
+                return response.data.tokens.map(token => ({
+                    address: token.address,
+                    name: token.name,
+                    creator: token.creator,
+                    initialSupply: token.totalSupply,
+                    createdAt: token.createdAt,
+                    txHash: token.creationTx
+                }));
+            }
+
+            return [];
+
+        } catch (error) {
+            console.log('⚠️  Storyscan API not available:', error.message);
+            return [];
+        }
+    }
+
+    // ✅ REMOVE ALL MOCK DATA METHODS
+    // Removed: generateMockIP()
+    // Removed: generateRandomIPName()
+
+    async processNewIPs(newIPs) {
+        for (const ip of newIPs) {
+            try {
+                // Check if we already processed this IP
+                const existingIP = await this.db.getIPAsset(ip.address);
+                if (existingIP) {
+                    continue; // Skip already processed IPs
+                }
+
+                // Save to database
+                await this.db.saveIPAsset(ip);
+                console.log(`💾 Saved new IP: ${ip.name} (${ip.address})`);
+
+                // Send alerts to subscribed users
+                await this.sendNewIPAlert(ip);
+
+                // Add to the list of monitored tokens for 2 hours
+                const monitorUntil = new Date(Date.now() + 2 * 60 * 60 * 1000);
+                this.monitoredTokens.push({ ...ip, monitorUntil });
+                console.log(`🔎 Monitoring new token ${ip.name} for 2 hours.`);
+
+            } catch (error) {
+                console.error('❌ Error processing new IP:', error.message);
+            }
+        }
+    }
+
+    async sendNewIPAlert(ip) {
+        try {
+            const users = await this.db.getAllUsers();
+
+            if (users.length === 0) {
+                console.log('📭 No users to alert');
+                return;
+            }
+
+            const alertMessage = `
+🆕 **NEW IP ASSET DETECTED!**
+
+**Name:** ${ip.name}
+**Address:** \`${ip.address}\`
+**Creator:** \`${ip.creator}\`
+**Supply:** ${ip.initialSupply ? parseInt(ip.initialSupply).toLocaleString() : 'Unknown'} tokens
+**Time:** ${new Date(ip.createdAt).toLocaleString()}
+**Block:** ${ip.blockNumber || 'Unknown'}
+
+[View on Storyscan](${this.storyscanUrl}/address/${ip.address})
+
+🚀 Real Story Protocol IP detected!
+            `;
+
+            console.log(`📢 Sending REAL IP alert to ${users.length} users: ${ip.name}`);
+
+            for (const user of users) {
+                try {
+                    await this.bot.sendMessage(user.chat_id, alertMessage, {
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: true
+                    });
+
+                    await new Promise(resolve => setTimeout(resolve, 100));
+
+                } catch (error) {
+                    console.error(`❌ Failed to send alert to user ${user.user_id}:`, error.message);
+                }
+            }
+
+        } catch (error) {
+            console.error('❌ Error sending IP alerts:', error);
+        }
+    }
+
+    async getRecentIPs(hours = 24) {
+        return await this.db.getRecentIPs(hours);
+    }
+
+    getConnectionStatus() {
+        return {
+            rpcConnected: !!this.provider,
+            currentRpc: this.provider ? this.rpcUrls[this.currentRpcIndex] : 'None',
+            monitoringActive: this.isMonitoring,
+            lastCheckedBlock: this.lastCheckedBlock,
+            mode: this.provider ? 'Real Blockchain Monitoring' : 'Disabled'
+        };
+    }
+
+    stopMonitoring() {
+        this.isMonitoring = false;
+        console.log('🛑 Story Protocol monitoring stopped');
+    }
+}
+
+module.exports = { StoryProtocolMonitor };
