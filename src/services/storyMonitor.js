@@ -118,9 +118,7 @@ class StoryProtocolMonitor {
         console.log('✅ Story Protocol monitoring started');
     }
 
-    
 
-        
     async monitorNewBlocks() {
         const checkInterval = 3000; // 3 seconds
 
@@ -245,7 +243,8 @@ class StoryProtocolMonitor {
                                         if (decodedLog.name === "Transfer") {
                                             ipAssetDataMap[extractedIpAssetToken].totalWip += decodedLog.args.value;
                                         }
-                                    } catch (e) { /* ignore non-transfer logs */ }
+                                    } catch (e) { /* ignore non-transfer logs */
+                                    }
                                 }
                             }
                         } catch (e) {
@@ -324,9 +323,9 @@ ${amountString}[View on Storyscan](${this.storyscanUrl}/tx/${tx.hash})
             if (this.simulationMode) {
                 const uniqueIpAssetTokens = [...new Set(ipAssetTokens)];
                 const tokenToBuy = uniqueIpAssetTokens[0] || null;
-                this.simulationResults.push({ blockNumber, tokenToBuy, count, totalWip });
+                this.simulationResults.push({blockNumber, tokenToBuy, count, totalWip});
                 if (tokenToBuy) {
-                    await this.executePurchase(tokenToBuy, 0.2, { dryRun: true });
+                    await this.executePurchase(tokenToBuy, 0.2, {dryRun: true});
                 }
                 return;
             }
@@ -489,7 +488,7 @@ ${txHashes.map(hash => ` - [${hash.substring(0, 10)}...](${this.storyscanUrl}/tx
         }
         // --- END OF DEBUG LOGGING ---
 
-        const { value } = decodedLog.args;
+        const {value} = decodedLog.args;
         const DECIMALS = 18; // Assuming 18 decimals, might need to be dynamic
         const threshold = ethers.parseUnits("15", DECIMALS);
 
@@ -507,7 +506,7 @@ ${txHashes.map(hash => ` - [${hash.substring(0, 10)}...](${this.storyscanUrl}/tx
                 return;
             }
 
-            const { from, to, value } = args;
+            const {from, to, value} = args;
             const DECIMALS = 18;
             const valueFormatted = ethers.formatUnits(value, DECIMALS);
 
@@ -545,15 +544,6 @@ ${to}
         }
     }
 
-    
-
-    
-
-    
-
-    
-
-    
 
     // ✅ FALLBACK: Monitor via Storyscan API
     async monitorViaStoryscan() {
@@ -636,7 +626,7 @@ ${to}
 
                 // Add to the list of monitored tokens for 2 hours
                 const monitorUntil = new Date(Date.now() + 2 * 60 * 60 * 1000);
-                this.monitoredTokens.push({ ...ip, monitorUntil });
+                this.monitoredTokens.push({...ip, monitorUntil});
                 console.log(`🔎 Monitoring new token ${ip.name} for 2 hours.`);
 
             } catch (error) {
@@ -709,83 +699,251 @@ ${to}
         console.log('🛑 Story Protocol monitoring stopped');
     }
 
+    // Add these helper methods to the StoryProtocolMonitor class
+
+// Helper function to validate decimals
+    validateDecimals(decimals) {
+        const decimalNum = Number(decimals);
+        if (decimalNum < 0 || decimalNum > 255 || !Number.isInteger(decimalNum)) {
+            throw new Error(`Invalid decimals: ${decimals}. Must be integer between 0-255`);
+        }
+        return decimalNum;
+    }
+
+// Helper function to get ERC20 token details with validation
+    async getERC20TokenDetails(tokenAddress, provider) {
+        try {
+            const tokenContract = new ethers.Contract(tokenAddress, [
+                'function decimals() view returns (uint8)',
+                'function symbol() view returns (string)',
+                'function name() view returns (string)',
+                'function totalSupply() view returns (uint256)',
+                'function balanceOf(address) view returns (uint256)'
+            ], provider);
+
+            const [decimals, symbol, name, totalSupply] = await Promise.all([
+                tokenContract.decimals(),
+                tokenContract.symbol(),
+                tokenContract.name(),
+                tokenContract.totalSupply()
+            ]);
+
+            // Validate decimals before returning
+            const validatedDecimals = this.validateDecimals(decimals);
+
+            return {
+                decimals: validatedDecimals,
+                symbol: symbol || 'UNKNOWN',
+                name: name || 'Unknown Token',
+                totalSupply
+            };
+        } catch (error) {
+            throw new Error(`Failed to get token details for ${tokenAddress}: ${error.message}`);
+        }
+    }
+
+// Updated executePurchase method - SDK-free approach
     async executePurchase(tokenToBuyAddress, amountWipToSpend, options = {}) {
-        const { dryRun = false } = options;
+        const {dryRun = false} = options;
+
         if (!this.signer) {
             console.error('❌ Signer not initialized. Cannot execute purchase.');
-            return;
+            return {success: false, error: 'No signer available'};
         }
 
-        console.log(`
-🚀 Attempting to purchase ${tokenToBuyAddress} with ${amountWipToSpend} WIP...`);
+        // Validate inputs
+        if (!ethers.isAddress(tokenToBuyAddress)) {
+            console.error('❌ Invalid token address provided');
+            return {success: false, error: 'Invalid token address'};
+        }
+
+        if (amountWipToSpend <= 0) {
+            console.error('❌ Invalid amount to spend');
+            return {success: false, error: 'Invalid amount'};
+        }
+
+        console.log(`🚀 Attempting to purchase ${tokenToBuyAddress} with ${amountWipToSpend} WIP...`);
 
         try {
             const walletAddress = await this.signer.getAddress();
 
-            // === STEP 1: Approve the Aggregator to spend WIP (ERC-20) ===
-            console.log('--- STEP 1: Approving Spender ---');
+            // Story Protocol specific addresses
             const WIP_TOKEN_ADDRESS = '0x1514000000000000000000000000000000000000';
-            const wip9Contract = new ethers.Contract(WIP_TOKEN_ADDRESS, ERC20_ABI, this.signer);
-            const amountToSend = ethers.parseUnits(amountWipToSpend.toString(), 18); // Assuming WIP has 18 decimals
+            const SWAP_ROUTER_ADDRESS = '0x1062916B1Be3c034C1dC6C26f682Daf1861A3909';
+            const QUOTER_CONTRACT_ADDRESS = '0x865E2Bff1d5f9a01b91196D31126C2e432bC0F6C';
 
-            const currentAllowance = await wip9Contract.allowance(walletAddress, AGGREGATOR_ADDRESS);
-            console.log(`Current allowance for Aggregator: ${ethers.formatEther(currentAllowance)} WIP9`);
+            // Contract ABIs
+            const ERC20_ABI = [
+                'function approve(address spender, uint256 amount) returns (bool)',
+                'function allowance(address owner, address spender) view returns (uint256)',
+                'function balanceOf(address account) view returns (uint256)',
+                'function decimals() view returns (uint8)',
+                'function symbol() view returns (string)',
+                'function name() view returns (string)'
+            ];
 
-            if (!dryRun && currentAllowance < amountToSend) {
-                console.log('Allowance is too low. Sending approve transaction...');
-                const approveTx = await wip9Contract.approve(AGGREGATOR_ADDRESS, ethers.MaxUint256, { gasLimit: GAS_LIMIT_APPROVE });
-                console.log(`Approve transaction sent: ${approveTx.hash}`);
-                await approveTx.wait();
-                console.log('✅ Approve transaction confirmed!');
-            } else {
-                console.log('✅ Sufficient allowance already set.');
+            const ROUTER_ABI = [
+                'function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)'
+            ];
+
+            const QUOTER_ABI = [
+                'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) view returns (uint256 amountOut)'
+            ];
+
+            // Get WIP token details
+            console.log('Getting WIP token details...');
+            const wipDetails = await this.getERC20TokenDetails(WIP_TOKEN_ADDRESS, this.provider);
+            console.log(`WIP Token: ${wipDetails.symbol} (${wipDetails.decimals} decimals)`);
+
+            // Get target token details
+            console.log('Getting target token details...');
+            const targetTokenDetails = await this.getERC20TokenDetails(tokenToBuyAddress, this.provider);
+            console.log(`Target Token: ${targetTokenDetails.symbol} (${targetTokenDetails.decimals} decimals)`);
+
+            // Check WIP balance
+            const wipContract = new ethers.Contract(WIP_TOKEN_ADDRESS, ERC20_ABI, this.signer);
+            const amountInWei = ethers.parseUnits(amountWipToSpend.toString(), wipDetails.decimals);
+
+            const wipBalance = await wipContract.balanceOf(walletAddress);
+            if (wipBalance < amountInWei) {
+                throw new Error(`Insufficient WIP balance. Have: ${ethers.formatUnits(wipBalance, wipDetails.decimals)}, Need: ${amountWipToSpend}`);
             }
 
-            // === STEP 2: Execute the Swap ===
-            console.log('--- STEP 2: Executing Swap ---');
+            // Get quote
+            console.log('Getting price quote...');
+            const quoterContract = new ethers.Contract(QUOTER_CONTRACT_ADDRESS, QUOTER_ABI, this.provider);
+            const fee = 3000; // 0.3% fee tier
 
-            // Dynamically replace the amount in rawInputForSwap
-            const newAmountHex = amountToSend.toString(16).padStart(64, '0');
-            const finalRawInput = rawInputForSwap.replace(originalAmountSlot, newAmountHex);
+            const quotedAmountOut = await quoterContract.quoteExactInputSingle(
+                WIP_TOKEN_ADDRESS,
+                tokenToBuyAddress,
+                fee,
+                amountInWei,
+                0
+            );
 
-            // Construct the transaction request
-            const txRequest = await this.signer.populateTransaction({
-                to: AGGREGATOR_ADDRESS, // Target of the transaction is the Aggregator
-                value: 0, // WIP jest ERC-20 – nie wysyłamy value
-                data: finalRawInput, // The encoded swap data
-                gasLimit: GAS_LIMIT_SWAP
-            });
+            const quotedAmountFormatted = ethers.formatUnits(quotedAmountOut, targetTokenDetails.decimals);
+            console.log(`Quote: ${amountWipToSpend} WIP → ${quotedAmountFormatted} ${targetTokenDetails.symbol}`);
+
+            // Check and handle approval
+            const currentAllowance = await wipContract.allowance(walletAddress, SWAP_ROUTER_ADDRESS);
+            console.log(`Current allowance: ${ethers.formatUnits(currentAllowance, wipDetails.decimals)} WIP`);
+
+            if (!dryRun && currentAllowance < amountInWei) {
+                console.log('Insufficient allowance, approving...');
+
+                const feeData = await this.provider.getFeeData();
+                const approveTx = await wipContract.approve(SWAP_ROUTER_ADDRESS, ethers.MaxUint256, {
+                    gasLimit: 120000n,
+                    ...(feeData.gasPrice ? {gasPrice: feeData.gasPrice} : {})
+                });
+
+                console.log(`Approve transaction sent: ${approveTx.hash}`);
+                const approveReceipt = await approveTx.wait();
+
+                if (approveReceipt.status !== 1) {
+                    throw new Error('Approval transaction failed');
+                }
+                console.log('✅ Approval confirmed');
+            }
 
             if (dryRun) {
-                console.log('[SIM] Dry-run purchase (no transaction sent):');
-                console.log(`      to: ${txRequest.to}`);
-                console.log(`      value: ${ethers.formatEther(txRequest.value)} WIP`);
-                console.log(`      dataLen: ${txRequest.data?.length || 0} bytes`);
-                console.log(`      gasLimit: ${txRequest.gasLimit}`);
-                return { dryRun: true, txRequest };
+                return {
+                    success: true,
+                    dryRun: true,
+                    quotedOutput: quotedAmountFormatted,
+                    targetToken: targetTokenDetails.symbol,
+                    needsApproval: currentAllowance < amountInWei
+                };
             }
 
-            console.log('Sending final swap transaction...');
-            const swapResponse = await this.signer.sendTransaction(txRequest);
-            console.log(`
-✅ Swap transaction sent! Hash: ${swapResponse.hash}`);
-            console.log('Waiting for transaction to be mined...');
+            // Prepare swap parameters
+            console.log('Preparing swap transaction...');
+            const routerContract = new ethers.Contract(SWAP_ROUTER_ADDRESS, ROUTER_ABI, this.signer);
 
-            const receipt = await swapResponse.wait();
-            console.log(`
-🎉 Purchase successful!`);
+            const swapParams = {
+                tokenIn: WIP_TOKEN_ADDRESS,
+                tokenOut: tokenToBuyAddress,
+                fee: fee,
+                recipient: walletAddress,
+                deadline: BigInt(Math.floor(Date.now() / 1000) + 60 * 20), // 20 minutes
+                amountIn: amountInWei,
+                amountOutMinimum: 0n, // No slippage protection for now
+                sqrtPriceLimitX96: 0n
+            };
+
+            // Estimate gas with fallback
+            let gasLimit = 350000n;
+            try {
+                const gasEstimate = await routerContract.exactInputSingle.estimateGas(swapParams, {value: 0});
+                gasLimit = gasEstimate * 2n; // 100% buffer
+                console.log(`Gas estimated: ${gasEstimate}, using: ${gasLimit}`);
+            } catch (e) {
+                console.log(`Gas estimation failed, using fallback: ${gasLimit}`);
+            }
+
+            // Execute swap
+            console.log('Executing swap transaction...');
+            const feeData = await this.provider.getFeeData();
+
+            const swapTx = await routerContract.exactInputSingle(swapParams, {
+                value: 0,
+                gasLimit,
+                ...(feeData.gasPrice ? {gasPrice: feeData.gasPrice} : {})
+            });
+
+            console.log(`✅ Swap transaction sent! Hash: ${swapTx.hash}`);
+
+            const receipt = await swapTx.wait();
+
+            if (receipt.status !== 1) {
+                throw new Error('Swap transaction failed');
+            }
+
+            console.log(`🎉 Purchase successful!`);
             console.log(`   - Block: ${receipt.blockNumber}`);
-            console.log(`   - View on StoryScan: ${this.storyscanUrl}/tx/${swapResponse.hash}`);
+            console.log(`   - Gas Used: ${receipt.gasUsed}`);
+            console.log(`   - View on StoryScan: ${this.storyscanUrl}/tx/${swapTx.hash}`);
+
+            // Check final balances
+            const finalTargetBalance = await new ethers.Contract(tokenToBuyAddress, ERC20_ABI, this.provider).balanceOf(walletAddress);
+            const receivedAmount = ethers.formatUnits(finalTargetBalance, targetTokenDetails.decimals);
+            console.log(`   - Received: ${receivedAmount} ${targetTokenDetails.symbol}`);
+
+            return {
+                success: true,
+                txHash: swapTx.hash,
+                blockNumber: receipt.blockNumber,
+                gasUsed: receipt.gasUsed.toString(),
+                receivedAmount,
+                targetToken: targetTokenDetails.symbol
+            };
 
         } catch (error) {
             console.error('❌ Error during purchase flow:');
-            const errorDetails = error.reason || (error.info ? JSON.stringify(error.info) : '') || error.message;
-            console.error(`   - Details: ${errorDetails}`);
-            console.error(error);
+            console.error(`   - Error: ${error.message}`);
+
+            // Enhanced error handling
+            if (error.message.includes('insufficient funds')) {
+                return {success: false, error: 'Insufficient funds for gas fees'};
+            } else if (error.message.includes('pool might not exist') || error.message.includes('quote')) {
+                return {success: false, error: 'Trading pair does not exist or has no liquidity'};
+            } else if (error.message.includes('slippage') || error.message.includes('SLIPPAGE')) {
+                return {success: false, error: 'Slippage too high - reduce trade size'};
+            } else if (error.message.includes('deadline')) {
+                return {success: false, error: 'Transaction deadline exceeded'};
+            } else if (error.message.includes('Insufficient WIP balance')) {
+                return {success: false, error: error.message};
+            }
+
+            return {
+                success: false,
+                error: error.message,
+                code: error.code
+            };
         }
     }
 }
-
 module.exports = { StoryProtocolMonitor };
 
 
