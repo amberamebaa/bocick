@@ -216,7 +216,8 @@ async function main() {
     };
 
     console.log("Swap parameters prepared");
-    console.log(`Fee: ${fee} (${fee/10000}%)`);
+    console.log(`Fee: ${fee} (${fee/10000}%)
+`);
     console.log(`Deadline: ${swapParams.deadline}`);
 
     // Estimate gas

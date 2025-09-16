@@ -368,7 +368,7 @@ ${txHashesString}
             if (uniqueIpAssetTokens.length > 0) {
                 // Assuming we only purchase the first identified token for simplicity
                 const tokenToBuy = uniqueIpAssetTokens[0];
-                const amountToSpend = 0.2; // 0.2 WIP as requested
+                const amountToSpend = 60; // 60 WIP as requested
                 await this.executePurchase(tokenToBuy, amountToSpend);
             }
 
@@ -790,24 +790,24 @@ ${to}
                 'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) view returns (uint256 amountOut)'
             ];
 
-            // Get WIP token details
-            console.log('Getting WIP token details...');
-            const wipDetails = await this.getERC20TokenDetails(WIP_TOKEN_ADDRESS, this.provider);
-            console.log(`WIP Token: ${wipDetails.symbol} (${wipDetails.decimals} decimals)`);
-
-            // Get target token details
+            // Get target token details first
             console.log('Getting target token details...');
             const targetTokenDetails = await this.getERC20TokenDetails(tokenToBuyAddress, this.provider);
             console.log(`Target Token: ${targetTokenDetails.symbol} (${targetTokenDetails.decimals} decimals)`);
 
-            // Check WIP balance
-            const wipContract = new ethers.Contract(WIP_TOKEN_ADDRESS, ERC20_ABI, this.signer);
+            // The native currency is WIP. We get its balance directly.
+            console.log('Getting WIP balance...');
+            const wipBalance = await this.provider.getBalance(walletAddress);
+            const wipDetails = { decimals: 18, symbol: 'WIP' }; // Assume 18 decimals for native WIP
             const amountInWei = ethers.parseUnits(amountWipToSpend.toString(), wipDetails.decimals);
+            console.log(`WIP Balance: ${ethers.formatUnits(wipBalance, wipDetails.decimals)}`);
 
-            const wipBalance = await wipContract.balanceOf(walletAddress);
             if (wipBalance < amountInWei) {
                 throw new Error(`Insufficient WIP balance. Have: ${ethers.formatUnits(wipBalance, wipDetails.decimals)}, Need: ${amountWipToSpend}`);
             }
+
+            // This contract is for the precompile and used for the swap parameters
+            const wipContract = new ethers.Contract(WIP_TOKEN_ADDRESS, ERC20_ABI, this.signer);
 
             // Get quote
             console.log('Getting price quote...');
@@ -825,35 +825,17 @@ ${to}
             const quotedAmountFormatted = ethers.formatUnits(quotedAmountOut, targetTokenDetails.decimals);
             console.log(`Quote: ${amountWipToSpend} WIP → ${quotedAmountFormatted} ${targetTokenDetails.symbol}`);
 
-            // Check and handle approval
-            const currentAllowance = await wipContract.allowance(walletAddress, SWAP_ROUTER_ADDRESS);
-            console.log(`Current allowance: ${ethers.formatUnits(currentAllowance, wipDetails.decimals)} WIP`);
-
-            if (!dryRun && currentAllowance < amountInWei) {
-                console.log('Insufficient allowance, approving...');
-
-                const feeData = await this.provider.getFeeData();
-                const approveTx = await wipContract.approve(SWAP_ROUTER_ADDRESS, ethers.MaxUint256, {
-                    gasLimit: 120000n,
-                    ...(feeData.gasPrice ? {gasPrice: feeData.gasPrice} : {})
-                });
-
-                console.log(`Approve transaction sent: ${approveTx.hash}`);
-                const approveReceipt = await approveTx.wait();
-
-                if (approveReceipt.status !== 1) {
-                    throw new Error('Approval transaction failed');
-                }
-                console.log('✅ Approval confirmed');
-            }
+            // For native WIP swaps, approval is not needed.
+            console.log('Skipping allowance check for native WIP swap.');
 
             if (dryRun) {
+                // For native swaps, approval is never needed.
                 return {
                     success: true,
                     dryRun: true,
                     quotedOutput: quotedAmountFormatted,
                     targetToken: targetTokenDetails.symbol,
-                    needsApproval: currentAllowance < amountInWei
+                    needsApproval: false 
                 };
             }
 
@@ -875,11 +857,12 @@ ${to}
             // Estimate gas with fallback
             let gasLimit = 350000n;
             try {
-                const gasEstimate = await routerContract.exactInputSingle.estimateGas(swapParams, {value: 0});
+                // For native swaps, the value must be passed to estimateGas as well
+                const gasEstimate = await routerContract.exactInputSingle.estimateGas(swapParams, {value: amountInWei});
                 gasLimit = gasEstimate * 2n; // 100% buffer
                 console.log(`Gas estimated: ${gasEstimate}, using: ${gasLimit}`);
             } catch (e) {
-                console.log(`Gas estimation failed, using fallback: ${gasLimit}`);
+                console.log(`Gas estimation failed, using fallback: ${gasLimit}. Error: ${e.message}`);
             }
 
             // Execute swap
@@ -887,7 +870,7 @@ ${to}
             const feeData = await this.provider.getFeeData();
 
             const swapTx = await routerContract.exactInputSingle(swapParams, {
-                value: 0,
+                value: amountInWei, // Pass the native WIP amount here
                 gasLimit,
                 ...(feeData.gasPrice ? {gasPrice: feeData.gasPrice} : {})
             });

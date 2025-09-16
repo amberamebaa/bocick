@@ -32,13 +32,8 @@ async function initializeBot() {
         if (rpcConnected) {
             console.log('✅ Story Protocol RPC connected');
 
-            // Start simulation instead of regular monitoring
-            const simStart = parseInt(process.env.SIM_START_BLOCK || '7468838', 10);
-            const simCount = parseInt(process.env.SIM_BLOCK_COUNT || '1', 10);
-            console.log(`Starting simulation: start=${simStart}, count=${simCount}`);
-            await storyMonitor.simulateBlocks(simStart, simCount);
-            console.log('✅ Simulation finished.');
-            process.exit(0); // Exit after simulation
+            // Start the actual monitoring
+            storyMonitor.startMonitoring(bot);
 
         } else {
             console.log('⚠️  Story Protocol monitoring disabled (RPC connection failed)');
