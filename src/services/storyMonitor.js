@@ -345,7 +345,7 @@ ${txHashesString}
             if (uniqueIpAssetTokens.length > 0) {
                 // Assuming we only purchase the first identified token for simplicity
                 const tokenToBuy = uniqueIpAssetTokens[0];
-                const amountToSpend = 200; // 200 WIP as requested
+                const amountToSpend = 250; // 250 WIP as requested
                 await this.executePurchase(tokenToBuy, amountToSpend);
             }
 
