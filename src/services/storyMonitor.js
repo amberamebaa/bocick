@@ -234,7 +234,7 @@ class StoryProtocolMonitor {
             // Po przetworzeniu wszystkich transakcji, sprawdź warunki dla każdego IP Asset
             for (const ipAssetAddress in ipAssetDataMap) {
                 const data = ipAssetDataMap[ipAssetAddress];
-                if (data.matchCount >= 10 && data.totalWip >= ethers.parseUnits("500", wipDecimals)) {
+                if (data.matchCount >= 15 && data.totalWip >= ethers.parseUnits("1100", wipDecimals)) {
                     const formattedWipTotal = ethers.formatUnits(data.totalWip, wipDecimals);
                     console.log(`🚨 TRADING CONDITIONS MET IN BLOCK ${blockNumber} for IP Asset: ${ipAssetAddress}!`);
                     console.log(`   - Found ${data.matchCount} matching transactions.`);
