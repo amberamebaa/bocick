@@ -95,31 +95,7 @@ class StoryProtocolMonitor {
 
         console.error('❌ All RPC endpoints failed.');
         return false;
-    }
-
-    async startMonitoring(bot) {
-        if (this.isMonitoring) {
-            console.log('⚠️  Monitoring already started');
-            return;
-        }
-
-        this.isMonitoring = true;
-        this.bot = bot;
-
-        console.log('🔍 Starting Story Protocol monitoring...');
-
-        if (this.provider) {
-            console.log('✅ Using real blockchain monitoring');
-            this.monitorNewBlocks();
-        } else {
-            console.log('❌ No RPC connection - monitoring disabled');
-        }
-
-        console.log('✅ Story Protocol monitoring started');
-    }
-
-
-    async monitorNewBlocks() {
+   async monitorNewBlocks() {
         const checkInterval = 3000; // 3 seconds
 
         const monitor = async () => {
@@ -156,6 +132,7 @@ class StoryProtocolMonitor {
 
         monitor();
     }
+
 
     // Simulation helper: scan a fixed range of blocks without sending Telegram alerts
     async simulateBlocks(startBlock, count) {
@@ -368,7 +345,7 @@ ${txHashesString}
             if (uniqueIpAssetTokens.length > 0) {
                 // Assuming we only purchase the first identified token for simplicity
                 const tokenToBuy = uniqueIpAssetTokens[0];
-                const amountToSpend = 100; // 60 WIP as requested
+                const amountToSpend = 200; // 200 WIP as requested
                 await this.executePurchase(tokenToBuy, amountToSpend);
             }
 
